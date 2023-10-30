@@ -1,0 +1,115 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#install.packages(c("shiny", "tidyverse", "readxl", "haven", "readr"))
+
+library(shiny)
+library(tidyverse)
+library(readxl)    
+library(haven)     
+library(readr)     
+library(shinyjs)
+
+```
+
+```{r}
+
+ui <- fluidPage(
+    useShinyjs(),
+    titlePanel("Interactive Data Analysis App"),
+    sidebarLayout(
+        sidebarPanel(
+            fileInput("file1", "Choose Data File",
+                      accept = c(
+                        "text/csv",
+                        "text/comma-separated-values",
+                        ".csv",
+                        ".xlsx",
+                        ".tsv",
+                        ".rds",
+                        ".sav"
+                      )),
+            checkboxInput("header", "Header", TRUE),
+            hr(),
+            h4("Data Wrangling Options"),
+            checkboxInput("filter_rows", "Filter Rows", FALSE),
+            conditionalPanel(
+                condition = "input.filter_rows == true",
+                textInput("filter_expr", "Filter Expression (e.g., `Sepal.Length > 5`)")
+            ),
+            checkboxInput("select_columns", "Select Columns", FALSE),
+            conditionalPanel(
+                condition = "input.select_columns == true",
+                textInput("select_cols", "Column Names (comma separated)")
+            ),
+            checkboxInput("mutate_data", "Add Calculated Column", FALSE),
+             actionButton("exit_button", "Exit"),  # Exit button
+            conditionalPanel(
+                condition = "input.mutate_data == true",
+                textInput("mutate_expr", "Calculation (e.g., `Sepal.Length * 2`)")
+            )
+        ),
+        mainPanel(
+            tableOutput("contents")
+        )
+    )
+)
+
+
+```
+
+```{r}
+server <- function(input, output) {
+    dataset <- reactive({
+        req(input$file1)
+        
+        ext <- tools::file_ext(input$file1$datapath)
+        
+        data <- switch(ext,
+               csv = read.csv(input$file1$datapath, header = input$header),
+               xlsx = read_excel(input$file1$datapath),
+               tsv = read_tsv(input$file1$datapath),
+               rds = readRDS(input$file1$datapath),
+               sav = read_sav(input$file1$datapath),
+               NULL
+        )
+
+        # Apply filter if selected
+        if (input$filter_rows) {
+            data <- data %>% filter(!!rlang::parse_expr(input$filter_expr))
+        }
+        
+        # Select columns if specified
+        if (input$select_columns) {
+            cols <- unlist(strsplit(input$select_cols, ","))
+            data <- data %>% select(all_of(cols))
+        }
+        
+        # Add calculated column if specified
+        if (input$mutate_data) {
+            data <- data %>% mutate(New_Column = !!rlang::parse_expr(input$mutate_expr))
+        }
+        
+        return(data)
+    })
+    
+    output$contents <- renderTable({
+        head(dataset(), 10)  # Displaying only the first 10 rows
+    })
+    
+    observeEvent(input$exit_button, {
+        stopApp()
+    })
+}
+
+
+```
+
+```{r}
+shinyApp(ui = ui, server = server)
+
+```
+
