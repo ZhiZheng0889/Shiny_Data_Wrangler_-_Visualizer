@@ -13,47 +13,49 @@ library(haven)
 library(readr)     
 library(shinyjs)
 
+# Custom Mode Function
+calculate_mode <- function(x) {
+  uniqx <- unique(x)
+  uniqx[which.max(tabulate(match(x, uniqx)))]
+}
 ```
 
 ```{r}
-
+# UI Definition
 ui <- fluidPage(
     useShinyjs(),
-    titlePanel("Interactive Data Analysis App"),
+    titlePanel("Interactive Data Analysis App with Data Handling"),
     sidebarLayout(
         sidebarPanel(
-            fileInput("file1", "Choose Data File",
-                      accept = c(
-                        "text/csv",
-                        "text/comma-separated-values",
-                        ".csv",
-                        ".xlsx",
-                        ".tsv",
-                        ".rds",
-                        ".sav"
-                      )),
-            checkboxInput("header", "Header", TRUE),
+            selectInput("dataset_choice", "Choose Dataset", choices = c("airquality")),
             hr(),
-            h4("Data Wrangling Options"),
-            checkboxInput("filter_rows", "Filter Rows", FALSE),
-            conditionalPanel(
-                condition = "input.filter_rows == true",
-                textInput("filter_expr", "Filter Expression (e.g., `Sepal.Length > 5`)")
-            ),
-            checkboxInput("select_columns", "Select Columns", FALSE),
-            conditionalPanel(
-                condition = "input.select_columns == true",
-                textInput("select_cols", "Column Names (comma separated)")
-            ),
-            checkboxInput("mutate_data", "Add Calculated Column", FALSE),
-             actionButton("exit_button", "Exit"),  # Exit button
-            conditionalPanel(
-                condition = "input.mutate_data == true",
-                textInput("mutate_expr", "Calculation (e.g., `Sepal.Length * 2`)")
-            )
+            h4("Data Handling Options"),
+
+            # Universal Columns Selector
+            selectInput("selected_cols", "Select Columns", choices = NULL, multiple = TRUE),
+
+            # Data Filtering UI
+            checkboxInput("enable_filter", "Enable Data Filtering", FALSE),
+            textInput("filter_condition", "Enter filter condition (e.g., `Ozone > 30`)"),
+
+            # Data Transformation UI
+            checkboxInput("enable_transformation", "Enable Data Transformation", FALSE),
+            selectInput("transformation_method", "Select Transformation Method", 
+                        choices = c("None", "Min-Max Scaling", "Z-Score Standardization", "Log Transformation")),
+
+            # Missing Data Handling UI
+            checkboxInput("handle_missing", "Handle Missing Values", FALSE),
+            radioButtons("missing_method", "Method", choices = c("Mean", "Median", "Mode", "Omit")),
+            
+            actionButton("update_data", "Update Data"),
+            actionButton("clear_cols", "Clear Column Selection"),
+            actionButton("exit_app", "Exit App")
         ),
         mainPanel(
-            tableOutput("contents")
+            h4("Data Preview"),
+            tableOutput("data_preview"),
+            h4("Missing Data Summary"),
+            tableOutput("missing_summary")  # Display for missing data summary
         )
     )
 )
@@ -62,51 +64,134 @@ ui <- fluidPage(
 ```
 
 ```{r}
-server <- function(input, output) {
+# Server Logic
+server <- function(input, output, session) {
+    # Load the dataset
     dataset <- reactive({
-        req(input$file1)
-        
-        ext <- tools::file_ext(input$file1$datapath)
-        
-        data <- switch(ext,
-               csv = read.csv(input$file1$datapath, header = input$header),
-               xlsx = read_excel(input$file1$datapath),
-               tsv = read_tsv(input$file1$datapath),
-               rds = readRDS(input$file1$datapath),
-               sav = read_sav(input$file1$datapath),
-               NULL
-        )
+        req(input$dataset_choice)
+        switch(input$dataset_choice,
+               "airquality" = airquality)
+    })
 
-        # Apply filter if selected
-        if (input$filter_rows) {
-            data <- data %>% filter(!!rlang::parse_expr(input$filter_expr))
-        }
-        
-        # Select columns if specified
-        if (input$select_columns) {
-            cols <- unlist(strsplit(input$select_cols, ","))
-            data <- data %>% select(all_of(cols))
-        }
-        
-        # Add calculated column if specified
-        if (input$mutate_data) {
-            data <- data %>% mutate(New_Column = !!rlang::parse_expr(input$mutate_expr))
-        }
-        
-        return(data)
+    # Reactive value for the updated dataset
+    updated_dataset <- reactiveVal()
+
+    # Function to count missing values in each column
+    count_missing <- function(data) {
+        data %>% summarise(across(everything(), ~sum(is.na(.)))) %>% pivot_longer(cols = everything(), names_to = "Column", values_to = "MissingCount")
+    }
+
+    # Reactive values for missing data summary
+    missing_summary_before <- reactiveVal()
+    missing_summary_after <- reactiveVal()
+
+    # Update column choices
+    observe({
+        columns <- names(dataset())
+        updateSelectInput(session, "selected_cols", choices = columns)
     })
-    
-    output$contents <- renderTable({
-        head(dataset(), 10)  # Displaying only the first 10 rows
+
+    # Observe Update Data button click
+    observeEvent(input$update_data, {
+        data <- dataset()
+        cols <- input$selected_cols
+
+        # Capture missing data summary before handling
+        missing_summary_before(count_missing(data))
+
+        # Data Filtering with Dynamic Condition
+        if (input$enable_filter && input$filter_condition != "") {
+            for (col in cols) {
+                condition <- paste0("`", col, "`", input$filter_condition)
+                tryCatch({
+                    data <- data %>% filter(!!rlang::parse_expr(condition))
+                }, error = function(e) {
+                    print(paste("Error in filter condition for column", col, ":", e$message))
+                    return(NULL)  # Return NULL to stop further processing
+                })
+            }
+        }
+
+        # Check if data is NULL after error in filtering
+        if (is.null(data)) return()
+
+        # Data Transformation
+        if (input$enable_transformation && input$transformation_method != "None") {
+            data <- switch(input$transformation_method,
+                   "Min-Max Scaling" = { data %>% mutate(across(all_of(cols), ~ (. - min(.)) / (max(.) - min(.)))) },
+                   "Z-Score Standardization" = { data %>% mutate(across(all_of(cols), ~ (scale(.) %>% as.vector))) },
+                   "Log Transformation" = { data %>% mutate(across(all_of(cols), log)) }
+            )
+        }
+
+        # Missing Data Handling
+        if (input$handle_missing) {
+            tryCatch({
+                if (input$missing_method == "Omit") {
+                    data <- data %>% filter(complete.cases(.[cols]))
+                } else {
+                    data <- data %>% mutate(across(all_of(cols), function(x) {
+                        if (input$missing_method == "Mean" || input$missing_method == "Median") {
+                            if (is.numeric(x)) {
+                                if (input$missing_method == "Mean") {
+                                    replace_na(x, mean(x, na.rm = TRUE))
+                                } else if (input$missing_method == "Median") {
+                                    replace_na(x, median(x, na.rm = TRUE))
+                                }
+                            } else {
+                                x  # Return column unchanged if it's not numeric
+                            }
+                        } else if (input$missing_method == "Mode") {
+                            # Replace with mode - define calculate_mode function if needed
+                            mode_val <- calculate_mode(x[!is.na(x)])
+                            replace_na(x, mode_val)
+                        } else {
+                            x
+                        }
+                    }))
+                }
+
+                updated_dataset(data)
+                missing_summary_after(count_missing(data))
+            }, error = function(e) {
+                print(paste("Error in missing data handling:", e$message))
+            })
+        } else {
+            updated_dataset(data)
+        }
     })
-    
-    observeEvent(input$exit_button, {
+
+    # Output for missing data summary
+    output$missing_summary <- renderTable({
+        req(input$show_missing)  # Render only when show_missing is true
+        summary_before <- missing_summary_before()
+        summary_after <- missing_summary_after()
+        if (!is.null(summary_before) && !is.null(summary_after)) {
+            summary_combined <- summary_before %>%
+                                left_join(summary_after, by = "Column", suffix = c("_Before", "_After"))
+            summary_combined
+        } else {
+            data.frame()  # Return empty dataframe if summaries are null
+        }
+    })
+
+    # Output for data preview
+    output$data_preview <- renderTable({
+        if (!is.null(updated_dataset())) {
+            head(updated_dataset(), 10)
+        } else {
+            head(dataset(), 10)
+        }
+    })
+
+    # Exit button functionality
+    observeEvent(input$exit_app, {
         stopApp()
     })
 }
 
-
 ```
+
 
 ```{r}
 shinyApp(ui = ui, server = server)
