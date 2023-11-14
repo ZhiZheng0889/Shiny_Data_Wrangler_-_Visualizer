@@ -12,7 +12,20 @@ library(readxl)
 library(haven)     
 library(readr)     
 library(shinyjs)
+library(dplyr)
+library(tidyr)
+```
 
+```{r}
+load_dataset <- function(input) {
+    req(input$dataset_choice)
+    switch(input$dataset_choice,
+           "airquality" = airquality)
+}
+
+```
+
+```{r}
 # Custom Mode Function
 calculate_mode <- function(x) {
   uniqx <- unique(x)
@@ -21,151 +34,105 @@ calculate_mode <- function(x) {
 ```
 
 ```{r}
-# UI Definition
-ui <- fluidPage(
-    useShinyjs(),
-    titlePanel("Interactive Data Analysis App with Data Handling"),
-    sidebarLayout(
-        sidebarPanel(
-            selectInput("dataset_choice", "Choose Dataset", choices = c("airquality")),
-            hr(),
-            h4("Data Handling Options"),
-
-            # Universal Columns Selector
-            selectInput("selected_cols", "Select Columns", choices = NULL, multiple = TRUE),
-
-            # Data Filtering UI
-            checkboxInput("enable_filter", "Enable Data Filtering", FALSE),
-            textInput("filter_condition", "Enter filter condition (e.g., `Ozone > 30`)"),
-
-            # Data Transformation UI
-            checkboxInput("enable_transformation", "Enable Data Transformation", FALSE),
-            selectInput("transformation_method", "Select Transformation Method", 
-                        choices = c("None", "Min-Max Scaling", "Z-Score Standardization", "Log Transformation")),
-
-            # Missing Data Handling UI
-            checkboxInput("handle_missing", "Handle Missing Values", FALSE),
-            radioButtons("missing_method", "Method", choices = c("Mean", "Median", "Mode", "Omit")),
-            
-            actionButton("update_data", "Update Data"),
-            actionButton("clear_cols", "Clear Column Selection"),
-            actionButton("exit_app", "Exit App")
-        ),
-        mainPanel(
-            h4("Data Preview"),
-            tableOutput("data_preview"),
-            h4("Missing Data Summary"),
-            tableOutput("missing_summary")  # Display for missing data summary
-        )
+initialize_reactive_values <- function() {
+    list(
+        updated_dataset = reactiveVal(),
+        missing_summary_before = reactiveVal(),
+        missing_summary_after = reactiveVal()
     )
-)
+}
+
+```
+
+```{r}
+update_column_choices <- function(session, dataset) {
+    observe({
+        columns <- names(dataset())
+        updateSelectInput(session, "selected_cols", choices = columns)
+    })
+}
+
+```
+
+```{r}
+filter_and_transform_data <- function(data, input) {
+    # Data Filtering
+    if (input$enable_filter && input$filter_condition != "") {
+        for (col in input$selected_cols) {
+            condition <- paste0("`", col, "`", input$filter_condition)
+            tryCatch({
+                data <- data %>% filter(!!rlang::parse_expr(condition))
+            }, error = function(e) {
+                print(paste("Error in filter condition for column", col, ":", e$message))
+                return(NULL)  # Return NULL to stop further processing
+            })
+        }
+    }
+
+    # Check if data is NULL after error in filtering
+    if (is.null(data)) return()
+
+    # Data Transformation
+    if (input$enable_transformation && input$transformation_method != "None") {
+        print("Applying Transformation")
+        print(head(data))
+        data <- switch(input$transformation_method,
+               "Min-Max Scaling" = { data %>% mutate(across(all_of(input$selected_cols), ~ (. - min(.)) / (max(.) - min(.)))) },
+               "Z-Score Standardization" = { data %>% mutate(across(all_of(input$selected_cols), ~ (scale(.) %>% as.vector))) },
+               "Log Transformation" = { data %>% mutate(across(all_of(input$selected_cols), log)) }
+        )
+        print("After Transformation")
+        print(head(data))
+    }
+
+    return(data)
+}
 
 
 ```
 
 ```{r}
-# Server Logic
-server <- function(input, output, session) {
-    # Load the dataset
-    dataset <- reactive({
-        req(input$dataset_choice)
-        switch(input$dataset_choice,
-               "airquality" = airquality)
-    })
-
-    # Reactive value for the updated dataset
-    updated_dataset <- reactiveVal()
-
-    # Function to count missing values in each column
-    count_missing <- function(data) {
-        data %>% summarise(across(everything(), ~sum(is.na(.)))) %>% pivot_longer(cols = everything(), names_to = "Column", values_to = "MissingCount")
-    }
-
-    # Reactive values for missing data summary
-    missing_summary_before <- reactiveVal()
-    missing_summary_after <- reactiveVal()
-
-    # Update column choices
-    observe({
-        columns <- names(dataset())
-        updateSelectInput(session, "selected_cols", choices = columns)
-    })
-
-    # Observe Update Data button click
-    observeEvent(input$update_data, {
-        data <- dataset()
-        cols <- input$selected_cols
-
-        # Capture missing data summary before handling
-        missing_summary_before(count_missing(data))
-
-        # Data Filtering with Dynamic Condition
-        if (input$enable_filter && input$filter_condition != "") {
-            for (col in cols) {
-                condition <- paste0("`", col, "`", input$filter_condition)
-                tryCatch({
-                    data <- data %>% filter(!!rlang::parse_expr(condition))
-                }, error = function(e) {
-                    print(paste("Error in filter condition for column", col, ":", e$message))
-                    return(NULL)  # Return NULL to stop further processing
-                })
-            }
-        }
-
-        # Check if data is NULL after error in filtering
-        if (is.null(data)) return()
-
-        # Data Transformation
-        if (input$enable_transformation && input$transformation_method != "None") {
-            data <- switch(input$transformation_method,
-                   "Min-Max Scaling" = { data %>% mutate(across(all_of(cols), ~ (. - min(.)) / (max(.) - min(.)))) },
-                   "Z-Score Standardization" = { data %>% mutate(across(all_of(cols), ~ (scale(.) %>% as.vector))) },
-                   "Log Transformation" = { data %>% mutate(across(all_of(cols), log)) }
-            )
-        }
-
-        # Missing Data Handling
-        if (input$handle_missing) {
-            tryCatch({
-                if (input$missing_method == "Omit") {
-                    data <- data %>% filter(complete.cases(.[cols]))
-                } else {
-                    data <- data %>% mutate(across(all_of(cols), function(x) {
-                        if (input$missing_method == "Mean" || input$missing_method == "Median") {
-                            if (is.numeric(x)) {
-                                if (input$missing_method == "Mean") {
-                                    replace_na(x, mean(x, na.rm = TRUE))
-                                } else if (input$missing_method == "Median") {
-                                    replace_na(x, median(x, na.rm = TRUE))
-                                }
-                            } else {
-                                x  # Return column unchanged if it's not numeric
-                            }
-                        } else if (input$missing_method == "Mode") {
-                            # Replace with mode - define calculate_mode function if needed
-                            mode_val <- calculate_mode(x[!is.na(x)])
-                            replace_na(x, mode_val)
-                        } else {
-                            x
-                        }
-                    }))
-                }
-
-                updated_dataset(data)
-                missing_summary_after(count_missing(data))
-            }, error = function(e) {
-                print(paste("Error in missing data handling:", e$message))
-            })
+handle_missing_data <- function(data, input) {
+    if (input$handle_missing) {
+        if (input$missing_method == "Omit") {
+            # Filter out rows with NAs in any of the selected columns
+            data <- data %>% filter(complete.cases(.[input$selected_cols]))
         } else {
-            updated_dataset(data)
+            # Handle other methods (Mean, Median, Mode)
+            data <- data %>% mutate(across(all_of(input$selected_cols), function(x) {
+                if (input$missing_method == "Mean" && is.numeric(x)) {
+                    replace_na(x, round(mean(x, na.rm = TRUE), 0)) # Round and convert to integer if needed
+                } else if (input$missing_method == "Median" && is.numeric(x)) {
+                    replace_na(x, round(median(x, na.rm = TRUE), 0)) # Similarly, for median
+                } else if (input$missing_method == "Mode" && is.numeric(x)) {
+                    mode_val <- calculate_mode(x[!is.na(x)])
+                    replace_na(x, mode_val)
+                } else {
+                    x # Return column unchanged if the condition does not apply
+                }
+            }))
         }
-    })
+    }
+    return(data)
+}
 
-    # Output for missing data summary
+```
+
+```{r}
+count_missing <- function(data) {
+    data %>% 
+    summarise(across(everything(), ~sum(is.na(.)))) %>% 
+    pivot_longer(cols = everything(), names_to = "Column", values_to = "MissingCount")
+}
+```
+
+
+```{r}
+render_missing_summary <- function(output, missing_summary_before, missing_summary_after) {
     output$missing_summary <- renderTable({
-        req(input$show_missing)  # Render only when show_missing is true
         summary_before <- missing_summary_before()
         summary_after <- missing_summary_after()
+
         if (!is.null(summary_before) && !is.null(summary_after)) {
             summary_combined <- summary_before %>%
                                 left_join(summary_after, by = "Column", suffix = c("_Before", "_After"))
@@ -174,27 +141,189 @@ server <- function(input, output, session) {
             data.frame()  # Return empty dataframe if summaries are null
         }
     })
+}
 
-    # Output for data preview
+
+
+```
+
+```{r}
+render_data_preview <- function(output, updated_dataset, original_dataset) {
     output$data_preview <- renderTable({
         if (!is.null(updated_dataset())) {
             head(updated_dataset(), 10)
         } else {
-            head(dataset(), 10)
+            head(original_dataset(), 10)  # Use the reactive expression for the original dataset
         }
     })
+}
+```
 
-    # Exit button functionality
-    observeEvent(input$exit_app, {
-        stopApp()
-    })
+```{r}
+perform_data_aggregation <- function(input, get_dataset) {
+    req(input$agg_dataset, input$agg_column, input$agg_function)
+
+    data <- get_dataset(input$agg_dataset)
+
+    if (input$group_by_column != "") {
+        data <- data %>% group_by(!!sym(input$group_by_column))
+    }
+
+    result <- data %>% summarise(
+        Aggregation = switch(input$agg_function,
+                             "Sum" = sum(!!sym(input$agg_column), na.rm = TRUE),
+                             "Average" = mean(!!sym(input$agg_column), na.rm = TRUE),
+                             "Median" = median(!!sym(input$agg_column), na.rm = TRUE),
+                             "Count" = n()
+        )
+    )
+    return(result)
+}
+
+```
+
+```{r}
+perform_string_manipulation <- function(input) {
+    req(input$string_input, input$string_operation)
+
+    result <- switch(input$string_operation,
+                     "Regex Match" = {
+                         pattern <- input$string_param
+                         ifelse(str_detect(input$string_input, pattern), "Match", "No Match")
+                     },
+                     "Split String" = {
+                         delimiter <- input$string_param
+                         str_split(input$string_input, delimiter, simplify = TRUE)
+                     },
+                     "Concatenate" = {
+                         additional_string <- input$string_param
+                         paste(input$string_input, additional_string)
+                     },
+                     "Invalid Operation"  # Default case
+    )
+    return(result)
 }
 
 ```
 
 
 ```{r}
-shinyApp(ui = ui, server = server)
+ui <- fluidPage(
+    useShinyjs(),
+    titlePanel("Interactive Data Analysis App with Data Handling"),
 
+    sidebarLayout(
+        sidebarPanel(
+            # Dataset selection for main dataset operations
+            selectInput("dataset_choice", "Choose Dataset", choices = c("airquality")),
+            hr(),
+
+            h4("Data Handling Options"),
+            # Universal Columns Selector
+            selectInput("selected_cols", "Select Columns", choices = NULL, multiple = TRUE),
+            # Data Filtering UI
+            checkboxInput("enable_filter", "Enable Data Filtering", FALSE),
+            textInput("filter_condition", "Enter filter condition (e.g., `Ozone > 30`)"),
+            # Data Transformation UI
+            checkboxInput("enable_transformation", "Enable Data Transformation", FALSE),
+            selectInput("transformation_method", "Select Transformation Method", 
+                        choices = c("None", "Min-Max Scaling", "Z-Score Standardization", "Log Transformation")),
+            # Missing Data Handling UI
+            checkboxInput("handle_missing", "Handle Missing Values", FALSE),
+            radioButtons("missing_method", "Method", choices = c("Mean", "Median", "Mode", "Omit")),
+            actionButton("update_data", "Update Data"),
+            actionButton("clear_cols", "Clear Column Selection"),
+            actionButton("exit_app", "Exit App"),
+
+            hr(),
+
+            # Data Aggregation UI
+            h4("Data Aggregation Options"),
+            selectInput("agg_dataset", "Choose Dataset for Aggregation", choices = c("airquality")),
+            selectInput("agg_column", "Column for Aggregation", choices = NULL),
+            selectInput("agg_function", "Aggregation Function", 
+                        choices = c("Sum", "Average", "Median", "Count")),
+            selectInput("group_by_column", "Group By Column (optional)", choices = NULL, selected = ""),
+
+            hr(),
+
+            # String Manipulation UI
+            h4("String Manipulation Options"),
+            textInput("string_input", "Enter String"),
+            selectInput("string_operation", "Select Operation", 
+                        choices = c("Regex Match", "Split String", "Concatenate")),
+            textInput("string_param", "Additional Parameter (e.g., regex pattern, delimiter)")
+        ),
+
+        mainPanel(
+            h4("Data Preview"),
+            tableOutput("data_preview"),
+
+            h4("Missing Data Summary"),
+            tableOutput("missing_summary"),
+
+            hr(),
+
+            h4("Data Aggregation Result"),
+            tableOutput("aggregation_result"),
+
+            hr(),
+
+            h4("String Manipulation Result"),
+            verbatimTextOutput("string_result")
+        )
+    )
+)
+
+
+
+```
+
+```{r}
+server <- function(input, output, session) {
+    dataset <- reactive(load_dataset(input))
+    reactive_vals <- initialize_reactive_values()
+
+    update_column_choices(session, dataset)
+
+    observeEvent(input$update_data, {
+        data <- dataset()
+        reactive_vals$missing_summary_before(count_missing(data))
+        
+        data <- filter_and_transform_data(data, input)
+        data <- handle_missing_data(data, input)
+        
+        reactive_vals$updated_dataset(data)
+        reactive_vals$missing_summary_after(count_missing(data))
+    })
+    
+    observe({
+        updateSelectInput(session, "agg_column", choices = names(dataset()))
+        updateSelectInput(session, "group_by_column", choices = c("", names(dataset())))
+    })
+
+    output$aggregation_result <- renderTable({
+        perform_data_aggregation(input, function(name) dataset())
+    })
+    
+    # Render the string manipulation result
+    output$string_result <- renderText({
+        perform_string_manipulation(input)
+    })
+
+    render_missing_summary(output, reactive_vals$missing_summary_before, reactive_vals$missing_summary_after)
+    render_data_preview(output, reactive_vals$updated_dataset, dataset)
+
+    observeEvent(input$exit_app, {
+        stopApp()
+    })
+}
+
+
+```
+
+
+```{r}
+shinyApp(ui = ui, server = server)
 ```
 
