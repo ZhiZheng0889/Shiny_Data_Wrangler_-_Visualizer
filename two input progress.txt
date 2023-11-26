@@ -1,0 +1,72 @@
+# Simulated datasets and visualizations
+pick_vis <- c("Histogram", "Summary", "Box Plot")
+data_names <- c("mtcars", "airquality", "iris")
+
+# UI
+ui_vic_v3 <- fluidPage(fluidRow(
+  column(
+    3,
+    "Visualization with Datasets",
+    selectInput("da_data", label = "Dataset", choices = data_names),
+    selectInput("da_visual", label = "Visualization", choices = pick_vis),
+  ),
+),
+fluidRow(uiOutput("select_visual")))
+
+# Server
+server_vic_v3 <- function(input, output, session) {
+  input_dat <- reactive({
+    # Convert the selected dataset to a data frame
+    get(input$da_data)
+  })
+  
+  input_vis <- reactive({
+    # Return the selected visualization type as a string
+    input$da_visual
+  })
+  
+  # Reactive values to keep track of the current output
+  rv <- reactiveValues(current_output = NULL)
+  
+  # Render the selected visualization
+  output$select_visual <- renderUI({
+    # Update the current_output based on the selected visualization
+    rv$current_output <- switch(
+      input_vis(),
+      "Histogram" = plotOutput("hist"),
+      "Summary" = verbatimTextOutput("summary"),
+      "Box Plot" = plotOutput("b_plot")
+    )
+    
+    # Return the current_output
+    rv$current_output
+  })
+  
+  # Render histogram
+  output$hist <- renderPlot({
+    hist(
+      input_dat(),
+      main = "Histogram",
+      col = "lightblue",
+      border = "black"
+    )
+  })
+  
+  # Render summary
+  output$summary <- renderPrint({
+    summary(input_dat())
+  })
+  
+  # Render box plot
+  output$b_plot <- renderPlot({
+    boxplot(
+      input_dat(),
+      main = "Box Plot",
+      col = "lightgreen",
+      border = "black"
+    )
+  })
+}
+
+# Run the app
+shinyApp(ui_vic_v3, server_vic_v3)
