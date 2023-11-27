@@ -60,25 +60,22 @@ missingDataServer <- function(id, data) {
             col <- input$selectColumn
             method <- input$missingDataMethod
 
-            # Define column_data within the scope
-            column_data <- data()[[col]]
-
-            if (method == "omit") {
-                newData <- data() %>% filter(!is.na(!!sym(col)))
+            newData <- if (method == "omit") {
+                data() %>% filter(!is.na(.[[col]]))
             } else {
-                # Handle other methods (mean, median, mode)
-                mode_value <- if (method == "mode") Mode(column_data[!is.na(column_data)]) else NULL
-                newData <- data() %>% mutate(!!col := case_when(
-                    is.na(!!sym(col)) & method == "mean" ~ mean(!!sym(col), na.rm = TRUE),
-                    is.na(!!sym(col)) & method == "median" ~ median(!!sym(col), na.rm = TRUE),
-                    is.na(!!sym(col)) & method == "mode" ~ mode_value,
-                    TRUE ~ !!sym(col)
-                ))
+                data() %>% mutate(!!col := ifelse(is.na(.[[col]]),
+                  switch(method,
+                    "mean" = mean(.[[col]], na.rm = TRUE),
+                    "median" = median(.[[col]], na.rm = TRUE),
+                    "mode" = Mode(.[[col]][!is.na(.[[col]])]),
+                    .[[col]]
+                  ), .[[col]]))
             }
             data(newData)
         })
     })
 }
+
 
 ```
 
@@ -311,9 +308,15 @@ wordCloudServer <- function(id, data) {
             updateSelectInput(session, "wordCloudColumn", choices = names(data()))
         })
 
-        output$wordCloudPlot <- renderPlot({
-            req(input$generateWordCloud)
-            text_data <- data()[[input$wordCloudColumn]]
+        # Reactive expression for processed text
+        processedText <- reactiveVal()
+
+        observeEvent(input$generateWordCloud, {
+            req(data())
+            # Sample the data if it's too large
+            sampled_data <- data()[sample(nrow(data()), min(1000, nrow(data()))), ]
+            text_data <- sampled_data[[input$wordCloudColumn]]
+
             preprocessText <- function(text) {
                 text <- tolower(text)
                 text <- removePunctuation(text)
@@ -321,10 +324,16 @@ wordCloudServer <- function(id, data) {
                 return(text)
             }
             processed_text <- sapply(text_data, preprocessText)
-            wordcloud::wordcloud(words = processed_text, min.freq = 2, random.order = FALSE)
+            processedText(processed_text)
+        })
+
+        output$wordCloudPlot <- renderPlot({
+            req(processedText())
+            wordcloud::wordcloud(words = processedText(), min.freq = 2, random.order = FALSE)
         })
     })
 }
+
 
 ```
 
@@ -332,27 +341,60 @@ wordCloudServer <- function(id, data) {
 networkGraphUI <- function(id) {
     ns <- NS(id)
     tagList(
-        # UI elements for network graph (e.g., node selection)
-        plotOutput(ns("networkGraphPlot"))
+        selectInput(ns("graphType"), "Select Graph Type:", 
+                    choices = c("Type 1", "Type 2", "Type 3")),
+        selectInput(ns("graphLayout"), "Select Layout:", 
+                    choices = c("Fruchterman-Reingold" = "fr", 
+                                "Circular" = "circle", 
+                                "Spring" = "spring")),
+        actionButton(ns("generateNetworkGraph"), "Generate Network Graph"),
+        plotOutput(ns("networkGraphPlot")),
+        uiOutput(ns("messageOutput"))  # Output for messages
     )
 }
 
 networkGraphServer <- function(id, data) {
     moduleServer(id, function(input, output, session) {
-        # Define a reactive expression that triggers on button click
+        ns <- session$ns  # Get the namespace function
+
         generateNetworkGraph <- eventReactive(input$generateNetworkGraph, {
             req(data())
-            # Code to create a network graph from the data
-            # Return the graph object
+            if (ncol(data()) < 2) {
+                # Send a message to the UI using the session object
+                session$sendCustomMessage(type = "networkGraphError", message = "Insufficient columns for network graph.")
+                return(NULL)
+            }
+
+            # Placeholder logic for creating the graph based on selected type
+            nodes <- data.frame(name = unique(unlist(data()[, 1:2])))
+            edges <- data.frame(from = data()$entity1, to = data()$entity2)
+            graph <- graph_from_data_frame(edges, vertices = nodes)
+
+            # Store the graph and the layout type in a list
+            list(graph = graph, layout = input$graphLayout)
         })
 
         output$networkGraphPlot <- renderPlot({
-            req(generateNetworkGraph())  # Use the reactive expression here
-            # Code to render the network graph
+            graphData <- generateNetworkGraph()
+            if (is.null(graphData)) {
+                return()
+            }
+
+            ggraph(graphData$graph, layout = graphData$layout) +
+                geom_edge_link(aes(edge_alpha = weight), show.legend = FALSE) +
+                geom_node_point(color = "darkblue", size = 5) +
+                geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+        })
+
+        output[[ns("messageOutput")]] <- renderUI({
+            if (is.null(generateNetworkGraph()) && !is.null(data()) && ncol(data()) < 2) {
+                tagList(
+                    h5("The data frame should contain at least two columns to generate a network graph.")
+                )
+            }
         })
     })
 }
-
 
 ```
 
@@ -387,6 +429,96 @@ barChartServer <- function(id, data) {
 
 ```
 
+```{r}
+histogramUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("selectedColumnHist"), "Select Column for Histogram:", choices = NULL),
+        plotOutput(ns("histPlot"))
+    )
+}
+
+```
+
+```{r}
+histogramServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        ns <- session$ns
+
+        # Observe changes in the dataset and update the column choices
+        observe({
+            updateSelectInput(session, ns("selectedColumnHist"), choices = names(data()))
+        })
+
+        output$histPlot <- renderPlot({
+            req(input$selectedColumnHist)
+            hist(
+                data()[[input$selectedColumnHist]],
+                main = "Histogram",
+                col = "lightblue",
+                border = "black"
+            )
+        })
+    })
+}
+
+```
+
+```{r}
+summaryUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        verbatimTextOutput(ns("summaryOutput"))
+    )
+}
+
+```
+
+```{r}
+summaryServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        output$summaryOutput <- renderPrint({
+            summary(data())
+        })
+    })
+}
+
+```
+
+```{r}
+boxPlotUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("selectedColumnBox"), "Select Column for Box Plot:", choices = NULL),
+        plotOutput(ns("boxPlot"))
+    )
+}
+
+```
+
+```{r}
+boxPlotServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        ns <- session$ns
+
+        # Observe changes in the dataset and update the column choices
+        observe({
+            updateSelectInput(session, ns("selectedColumnBox"), choices = names(data()))
+        })
+
+        output$boxPlot <- renderPlot({
+            req(input$selectedColumnBox)
+            boxplot(
+                data()[[input$selectedColumnBox]],
+                main = "Box Plot",
+                col = "lightgreen",
+                border = "black"
+            )
+        })
+    })
+}
+
+```
 
 
 ```{r}
@@ -405,22 +537,39 @@ ui <- fluidPage(
         ),
 
         mainPanel(
+            # Main Tabset Panel
             tabsetPanel(
-                tabPanel("Handle Missing Data", missingDataUI("missingDataModule")),
-                tabPanel("Data Filtering", dataFilteringUI("dataFilteringModule")),
-                tabPanel("Data Transformation", dataTransformationUI("dataTransformationModule")),
-                tabPanel("Feature Engineering", featureEngineeringUI("featureEngineeringModule")),
-                tabPanel("Subsetting", subsettingUI("subsettingModule")),
-                tabPanel("Data Aggregation", dataAggregationUI("dataAggregationModule")),
-                tabPanel("Word Cloud", wordCloudUI("wordCloudModule")),
-                tabPanel("Network Graph", networkGraphUI("networkGraphModule")),
-                tabPanel("Bar Chart", barChartUI("barChartModule"))
+                # Data Wrangling Tab
+                tabPanel("Data Wrangling", 
+                    tabsetPanel(
+                        tabPanel("Handle Missing Data", missingDataUI("missingDataModule")),
+                        tabPanel("Data Filtering", dataFilteringUI("dataFilteringModule")),
+                        tabPanel("Data Transformation", dataTransformationUI("dataTransformationModule")),
+                        tabPanel("Feature Engineering", featureEngineeringUI("featureEngineeringModule")),
+                        tabPanel("Subsetting", subsettingUI("subsettingModule")),
+                        tabPanel("Data Aggregation", dataAggregationUI("dataAggregationModule"))
+                    )
+                ),
+                # Data Visualization Tab
+                tabPanel("Data Visualization",
+                    tabsetPanel(
+                        tabPanel("Summary", summaryUI("summaryModule")),
+                        tabPanel("Histogram", histogramUI("histogramModule")),
+                        tabPanel("Box Plot", boxPlotUI("boxPlotModule")),
+                        tabPanel("Word Cloud", wordCloudUI("wordCloudModule")),
+                        tabPanel("Network Graph", networkGraphUI("networkGraphModule")),
+                        tabPanel("Bar Chart", barChartUI("barChartModule"))
+                    )
+                )
             ),
+            h3("Data Preview"),
             DTOutput("dataPreview"),
+            h3("Missing Data Summary"),
             DTOutput("missingDataSummary")
         )
     )
 )
+
 
 ```
 
@@ -489,6 +638,15 @@ server <- function(input, output, session) {
     
     # Call the data bar chart module
     barChartServer("barChartModule", selectedData)
+    
+    # Call the histogram chart module
+    histogramServer("histogramModule", selectedData)
+    
+    # Call the summary module
+    summaryServer("summaryModule", selectedData)
+    
+    # Call the boxplot chart module
+    boxPlotServer("boxPlotModule", selectedData)
 
 }
 
