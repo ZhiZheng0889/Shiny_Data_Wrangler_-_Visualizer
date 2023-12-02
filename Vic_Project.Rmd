@@ -1,0 +1,809 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+# Load required libraries
+library(shiny)
+library(quanteda)
+library(wordcloud)
+library(igraph)
+library(ggraph)
+library(ggplot2)
+library(dplyr)
+library(DT)
+library(tm)
+library(slam)
+
+
+# Read the uploaded dataset
+friends_quotes <- read.csv("D:\\Vic_Red_Start_Here\\School Working Folder\\SciComp\\friends_quotes.csv")
+
+```
+
+
+```{r}
+Mode <- function(x) {
+    ux <- unique(x)
+    ux[which.max(tabulate(match(x, ux)))]
+}
+
+```
+
+
+```{r}
+# UI for handling missing data
+missingDataUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("selectColumn"), "Select Column:", choices = NULL),
+        radioButtons(ns("missingDataMethod"), "Method:",
+                     choices = list("Mean" = "mean", 
+                                    "Median" = "median", 
+                                    "Mode" = "mode", 
+                                    "Omit" = "omit")),
+        actionButton(ns("applyMissingDataMethod"), "Apply")
+    )
+}
+
+```
+
+```{r}
+# Server logic for handling missing data
+missingDataServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "selectColumn", choices = names(data()))
+        })
+
+        observeEvent(input$applyMissingDataMethod, {
+            req(data())  # Ensure data is available
+            col <- input$selectColumn
+            method <- input$missingDataMethod
+
+            newData <- if (method == "omit") {
+                data() %>% filter(!is.na(.[[col]]))
+            } else {
+                data() %>% mutate(!!col := ifelse(is.na(.[[col]]),
+                  switch(method,
+                    "mean" = mean(.[[col]], na.rm = TRUE),
+                    "median" = median(.[[col]], na.rm = TRUE),
+                    "mode" = Mode(.[[col]][!is.na(.[[col]])]),
+                    .[[col]]
+                  ), .[[col]]))
+            }
+            data(newData)
+        })
+    })
+}
+
+
+```
+
+```{r}
+# UI for data filtering
+dataFilteringUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("selectColumnFilter"), "Select Column for Filtering:", choices = NULL),
+        numericInput(ns("thresholdValue"), "Threshold Value:", value = 0),
+        selectInput(ns("condition"), "Condition:",
+                    choices = c("Greater Than" = ">", 
+                                "Less Than" = "<", 
+                                "Equal To" = "==", 
+                                "Not Equal To" = "!=")),
+        actionButton(ns("applyFilter"), "Apply Filter")
+    )
+}
+
+```
+
+```{r}
+# Server logic for data filtering
+dataFilteringServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "selectColumnFilter", 
+                              choices = names(data()))
+        })
+
+        observeEvent(input$applyFilter, {
+            if (!is.null(data()) && !is.null(input$selectColumnFilter)) {
+                col <- input$selectColumnFilter
+                condition <- input$condition
+                threshold <- input$thresholdValue
+
+                filterExpression <- paste0("(", col, " ", condition, " ", threshold, ")")
+                newData <- data() %>% filter(eval(parse(text=filterExpression)))
+                data(newData)
+            }
+        })
+    })
+}
+
+```
+
+```{r}
+# UI for data transformation
+dataTransformationUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("selectColumnTransform"), "Select Column for Transformation:", choices = NULL),
+        selectInput(ns("transformationType"), "Transformation Type:",
+                    choices = c("Min-Max Scaling" = "minmax", 
+                                "Z-Score Standardization" = "zscore", 
+                                "Log Transformation" = "log")),
+        actionButton(ns("applyTransformation"), "Apply Transformation")
+    )
+}
+
+```
+
+```{r}
+# Server logic for data transformation
+dataTransformationServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "selectColumnTransform", 
+                              choices = names(data()))
+        })
+
+        observeEvent(input$applyTransformation, {
+            if (!is.null(data()) && !is.null(input$selectColumnTransform)) {
+                col <- input$selectColumnTransform
+                transformation <- input$transformationType
+
+                newData <- data() %>% mutate(!!col := case_when(
+                    transformation == "minmax" ~ ( !!sym(col) - min(!!sym(col), na.rm = TRUE) ) / ( max(!!sym(col), na.rm = TRUE) - min(!!sym(col),
+                                                    na.rm = TRUE) ),
+                    transformation == "zscore" ~ ( !!sym(col) - mean(!!sym(col), na.rm = TRUE) ) / sd(!!sym(col), na.rm = TRUE),
+                    transformation == "log" ~ log(!!sym(col)),
+                    TRUE ~ !!sym(col)
+                ))
+                data(newData)
+            }
+        })
+    })
+}
+
+```
+
+```{r}
+featureEngineeringUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("featureColumn1"), "Select First Column:", choices = NULL),
+        selectInput(ns("featureColumn2"), "Select Second Column (optional):", choices = c("None" = NULL, NULL)),
+        textInput(ns("newFeatureName"), "Name of New Feature:"),
+        selectInput(ns("featureOperation"), "Operation:",
+                    choices = c("Add" = "+", "Subtract" = "-", "Multiply" = "*", "Divide" = "/", "Log" = "log", "Exp" = "exp")),
+        actionButton(ns("applyFeatureEngineering"), "Create Feature")
+    )
+}
+
+
+```
+
+```{r}
+# Module Server Function
+featureEngineeringServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "featureColumn1", choices = names(data()))
+            updateSelectInput(session, "featureColumn2", choices = c("None" = NULL, names(data())))
+        })
+
+        observeEvent(input$applyFeatureEngineering, {
+            if (!is.null(data()) && !is.null(input$featureColumn1) && input$newFeatureName != "") {
+                col1 <- input$featureColumn1
+                col2 <- input$featureColumn2
+                operation <- input$featureOperation
+                newFeatureName <- input$newFeatureName
+
+                newData <- data()
+                if (!is.null(col2) && col2 != "None") {
+                    newData <- newData %>% mutate(!!newFeatureName := eval(parse(text = paste0(col1, operation, col2))))
+                } else {
+                    if (operation %in% c("log", "exp")) {
+                        newData <- newData %>% mutate(!!newFeatureName := eval(parse(text = paste0(operation, "(", col1, ")"))))
+                    } else {
+                        newData <- newData %>% mutate(!!newFeatureName := eval(parse(text = paste0(col1, operation))))
+                    }
+                }
+                data(newData)
+            }
+        })
+    })
+}
+```
+
+```{r}
+subsettingUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("subsetColumn"), "Select Column for Subsetting:", choices = NULL),
+        textInput(ns("subsetCondition"), "Condition (e.g., '>5', '==10'):"),
+        actionButton(ns("applySubsetting"), "Apply Subsetting")
+    )
+}
+
+```
+
+```{r}
+# Module Server Function
+subsettingServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "subsetColumn", choices = names(data()))
+        })
+
+        observeEvent(input$applySubsetting, {
+            if (!is.null(data()) && !is.null(input$subsetColumn)) {
+                col <- input$subsetColumn
+                condition <- input$subsetCondition
+
+                subsetExpression <- paste0(col, " ", condition)
+                newData <- data() %>% filter(eval(parse(text = subsetExpression)))
+                data(newData)
+            }
+        })
+    })
+}
+```
+
+```{r}
+dataAggregationUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("groupColumn"), "Select Column to Group By:", choices = NULL),
+        selectInput(ns("aggregateColumn"), "Select Column to Aggregate:", choices = NULL),
+        selectInput(ns("aggregateFunction"), "Aggregation Function:",
+                    choices = c("Sum" = "sum", "Average" = "mean", "Count" = "n", "Maximum" = "max", "Minimum" = "min")),
+        actionButton(ns("applyAggregation"), "Apply Aggregation")
+    )
+}
+
+# Server logic for data aggregation
+dataAggregationServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "groupColumn", choices = names(data()))
+            updateSelectInput(session, "aggregateColumn", choices = names(data()))
+        })
+
+        observeEvent(input$applyAggregation, {
+            if (!is.null(data()) && !is.null(input$groupColumn) && !is.null(input$aggregateColumn)) {
+                groupCol <- input$groupColumn
+                aggCol <- input$aggregateColumn
+                aggFunc <- input$aggregateFunction
+
+                newData <- if (aggFunc == "n") {
+                    data() %>% group_by(!!sym(groupCol)) %>% summarise(aggValue = n())
+                } else {
+                    data() %>% group_by(!!sym(groupCol)) %>% summarise(aggValue = match.fun(aggFunc)(!!sym(aggCol)))
+                }
+                data(newData)
+            }
+        })
+    })
+}
+
+
+```
+
+```{r}
+# UI for Word Cloud Module
+wordCloudUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("wordCloudColumn"), "Select Column for Word Cloud:", choices = NULL),
+        actionButton(ns("generateWordCloud"), "Generate Word Cloud"),
+        plotOutput(ns("wordCloudPlot"))
+    )
+}
+
+# Server for Word Cloud Module
+wordCloudServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        observe({
+            updateSelectInput(session, "wordCloudColumn", choices = names(data()))
+        })
+
+        # Reactive expression for processed text
+        processedText <- reactiveVal()
+
+        observeEvent(input$generateWordCloud, {
+            req(data())
+            # Sample the data if it's too large
+            sampled_data <- data()[sample(nrow(data()), min(1000, nrow(data()))), ]
+            text_data <- sampled_data[[input$wordCloudColumn]]
+
+            preprocessText <- function(text) {
+                text <- tolower(text)
+                text <- removePunctuation(text)
+                text <- removeWords(text, stopwords("en"))
+                return(text)
+            }
+            processed_text <- sapply(text_data, preprocessText)
+            processedText(processed_text)
+        })
+
+        output$wordCloudPlot <- renderPlot({
+            req(processedText())
+            wordcloud::wordcloud(words = processedText(), min.freq = 2, random.order = FALSE)
+        })
+    })
+}
+
+
+```
+
+```{r}
+networkGraphUI <- function(id) {
+    ns <- NS(id)
+    tagList(
+        selectInput(ns("graphType"), "Select Graph Type:", 
+                    choices = c("Type 1", "Type 2", "Type 3")),
+        selectInput(ns("graphLayout"), "Select Layout:", 
+                    choices = c("Fruchterman-Reingold" = "fr", 
+                                "Circular" = "circle", 
+                                "Spring" = "spring")),
+        actionButton(ns("generateNetworkGraph"), "Generate Network Graph"),
+        plotOutput(ns("networkGraphPlot")),
+        uiOutput(ns("messageOutput"))  # Output for messages
+    )
+}
+
+networkGraphServer <- function(id, data) {
+    moduleServer(id, function(input, output, session) {
+        ns <- session$ns  # Get the namespace function
+
+        generateNetworkGraph <- eventReactive(input$generateNetworkGraph, {
+            req(data())
+            if (ncol(data()) < 2) {
+                # Send a message to the UI using the session object
+                session$sendCustomMessage(type = "networkGraphError", message = "Insufficient columns for network graph.")
+                return(NULL)
+            }
+
+            # Placeholder logic for creating the graph based on selected type
+            nodes <- data.frame(name = unique(unlist(data()[, 1:2])))
+            edges <- data.frame(from = data()$entity1, to = data()$entity2)
+            graph <- graph_from_data_frame(edges, vertices = nodes)
+
+            # Store the graph and the layout type in a list
+            list(graph = graph, layout = input$graphLayout)
+        })
+
+        output$networkGraphPlot <- renderPlot({
+            graphData <- generateNetworkGraph()
+            if (is.null(graphData)) {
+                return()
+            }
+
+            ggraph(graphData$graph, layout = graphData$layout) +
+                geom_edge_link(aes(edge_alpha = weight), show.legend = FALSE) +
+                geom_node_point(color = "darkblue", size = 5) +
+                geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+        })
+
+        output[[ns("messageOutput")]] <- renderUI({
+            if (is.null(generateNetworkGraph()) && !is.null(data()) && ncol(data()) < 2) {
+                tagList(
+                    h5("The data frame should contain at least two columns to generate a network graph.")
+                )
+            }
+        })
+    })
+}
+
+```
+
+## Scatter Plot works Great!
+
+```{r}
+
+# Scatter Plot Module UI
+scatterUI <- function(id) {
+  ns <- NS(id)
+  tagList(
+    selectInput(
+      ns("scatterColumn1"),
+      "Select Continuous Variable for Scatter Plot:",
+      choices = NULL
+    ),
+    selectInput(
+      ns("scatterColumn2"),
+      "Select Continuous Variable for Scatter Plot:",
+      choices = NULL
+    ),
+    selectInput(ns("scatterColumn3"),
+                "Select Category for Color:",
+                choices = NULL),
+    actionButton(ns("generateScatter"), "Generate Scatter Plot"),
+    plotOutput(ns("scatterPlot"))
+  )
+}
+
+
+# Scatter Plot Module Server
+scatterServer <- function(id, data) {
+  moduleServer(id, function(input, output, session) {
+    observe({
+      choices <- names(data())
+      updateSelectInput(session, "scatterColumn1", choices = choices)
+      updateSelectInput(session, "scatterColumn2", choices = choices)
+      updateSelectInput(session, "scatterColumn3", choices = choices)
+    })
+    
+    observeEvent(input$generateScatter, {
+      req(input$scatterColumn1,
+          input$scatterColumn2,
+          input$scatterColumn2,
+          data())
+    })
+    
+    output$scatterPlot <- renderPlot({
+      req(
+        input$generateScatter,
+        input$scatterColumn1,
+        input$scatterColumn2,
+        input$scatterColumn3,
+        data()
+      )
+      
+      # Scatter plot with color and titles!!
+      ggplot(
+        data = data(),
+        mapping = aes_string(
+          x = input$scatterColumn1,
+          y = input$scatterColumn2,
+          color = input$scatterColumn3
+        )
+      ) +
+        geom_point(
+          size = 3,
+          alpha = 1,
+          #transparency
+          shape = 4,
+          stroke = 1 #boldness
+        ) +
+        labs(
+          title = "Scatter Plot for Selected Data",
+          subtitle = "Two Variables: Both continuous",
+          caption = "Created with Zheng-Miranda Shiny App",
+          x = input$scatterColumn1,
+          y = input$scatterColumn2
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(
+            color = "#0099CC",
+            size = 16,
+            face = "bold"
+          ),
+          plot.subtitle = element_text(size = 10, face = "bold"),
+          plot.caption = element_text(face = "italic")
+        )  # end ggplot
+      
+    })
+  })
+}
+
+```
+
+## Histogram Works Great!!
+
+```{r}
+
+# UI for Histogram Module
+histogramUI <- function(id) {
+  ns <- NS(id)
+  tagList(
+    selectInput(ns("histColumn"), "Select Column for Histogram:", choices = NULL),
+    actionButton(ns("generateHist"), "Generate Histogram"),
+    plotOutput(ns("histPlot"))
+  )
+}
+
+
+# Server for Histogram Module
+histogramServer <- function(id, data) {
+  moduleServer(id, function(input, output, session) {
+    observe({
+      choices <- names(data())
+      updateSelectInput(session, "histColumn", choices = choices)
+    })
+    
+    observeEvent(input$generateHist, {
+      req(input$histColumn, data())
+    })
+    
+    output$histPlot <- renderPlot({
+      req(input$generateHist, input$histColumn, data())
+      
+      ggplot(data(), aes_string(x = input$histColumn)) +
+        geom_histogram(
+          color = "#000000",
+          fill = "#69b3a2",
+          bins = 30,
+          # Adjust the number of bins
+          boundary = 0  # Ensure that bins start at 0 for positive values
+        ) +
+        labs(
+          title = paste("Histogram of", input$histColumn),
+          subtitle = "One Variable: Continuous",
+          caption = "Created with Zheng-Miranda Shiny App",
+          x = input$histColumn,
+          y = "Count"
+        ) +
+        theme_minimal() +
+        theme(
+          plot.title = element_text(
+            color = "#0099CC",
+            size = 16,
+            face = "bold"
+          ),
+          plot.subtitle = element_text(size = 10, face = "bold"),
+          plot.caption = element_text(face = "italic")
+        )
+    })
+  })
+}
+
+```
+
+## Summary Works Great!!
+
+```{r}
+
+# Summary UI Module
+summaryUI <- function(id) {
+  ns <- NS(id)
+  tagList(DT::dataTableOutput(ns("summaryTable")),
+          verbatimTextOutput(ns("summaryOutput")))
+}
+
+
+# Summary Server
+summaryServer <- function(id, data) {
+  moduleServer(id, function(input, output, session) {
+    # output table
+    output$summaryTable <- DT::renderDataTable({
+      DT::datatable(data.frame(sapply(lapply(
+        data(), unique
+      ), length)), colnames = "Unique Values")
+    })
+    # output summary
+    output$summaryOutput <- renderPrint({
+      summary(data())
+      
+    })
+  })
+}
+ 
+
+```
+
+
+## Violin Works great!
+
+```{r}
+# Violin Plot Module UI
+violinUI <- function(id) {
+  ns <- NS(id)
+  tagList(
+    selectInput(
+      ns("violinColumn1"),
+      "Select Discrete Variable for Violin Plot:",
+      choices = NULL
+    ),
+    selectInput(
+      ns("violinColumn2"),
+      "Select Continuous Variable for Violin Plot:",
+      choices = NULL
+    ),
+    actionButton(ns("generateViolin"), "Generate Violin Plot"),
+    plotOutput(ns("violinPlot"))
+  )
+}
+
+
+# Violin Plot Module Server
+violinServer <- function(id, data) {
+  moduleServer(id, function(input, output, session) {
+    
+    observe({
+      choices <- names(data())
+      updateSelectInput(session, "violinColumn1", choices = choices)
+      updateSelectInput(session, "violinColumn2", choices = choices)
+    })
+    
+    observeEvent(input$generateViolin, {
+      req(input$violinColumn1, input$violinColumn2, data())
+    })
+    
+    output$violinPlot <- renderPlot({
+      req(input$generateViolin,
+          input$violinColumn1,
+          input$violinColumn2,
+          data())
+      
+      # Violin plot with color and titles!!
+      ggplot(data = data(),
+             aes_string(
+               x = input$violinColumn1,
+               y = input$violinColumn2
+             )) +
+        geom_violin(
+          mapping = aes_string(fill = input$violinColumn1),
+          alpha = 1,
+          #transparency
+          trim = FALSE,
+          draw_quantiles = c(0.25, 0.5, 0.75)
+        ) +
+        labs(
+          title = "Violin Plot for Selected Data",
+          subtitle = "Two Variables: One discrete, one continuous",
+          caption = "Created with Zheng-Miranda Shiny App",
+          x = input$violinColumn1,
+          y = input$violinColumn2
+        ) +
+        #theme_minimal() +
+        theme(
+          plot.title = element_text(
+            color = "#0099CC",
+            size = 16,
+            face = "bold"
+          ),
+          plot.subtitle = element_text(size = 10, face = "bold"),
+          plot.caption = element_text(face = "italic")
+        ) # end ggplot
+      
+    })
+  })
+}
+
+```
+
+
+```{r}
+ui <- fluidPage(
+    titlePanel("Data Manipulation App"),
+
+    sidebarLayout(
+        sidebarPanel(
+            actionButton("exitButton", "Exit App"),
+            selectInput("dataset", "Choose a dataset:", 
+                        choices = c("Air Quality" = "airquality", 
+                                    "Iris" = "iris", 
+                                    "Motor Cars" = "mtcars",
+                                    "Friends Quotes" = "friends_quotes")),
+            actionButton("loadData", "Load Data")
+        ),
+
+        mainPanel(
+            # Main Tabset Panel
+            tabsetPanel(
+                # Data Wrangling Tab
+                tabPanel("Data Wrangling", 
+                    tabsetPanel(
+                        tabPanel("Handle Missing Data", missingDataUI("missingDataModule")),
+                        tabPanel("Data Filtering", dataFilteringUI("dataFilteringModule")),
+                        tabPanel("Data Transformation", dataTransformationUI("dataTransformationModule")),
+                        tabPanel("Feature Engineering", featureEngineeringUI("featureEngineeringModule")),
+                        tabPanel("Subsetting", subsettingUI("subsettingModule")),
+                        tabPanel("Data Aggregation", dataAggregationUI("dataAggregationModule"))
+                    )
+                ),
+                # Data Visualization Tab
+                tabPanel("Data Visualization",
+                    tabsetPanel(
+                        tabPanel("Summary", summaryUI("summaryModule")),
+                        tabPanel("Histogram", histogramUI("histogramModule")),
+                        tabPanel("Violin Plot", violinUI("violinPlotModule")),
+                        tabPanel("Word Cloud", wordCloudUI("wordCloudModule")),
+                        tabPanel("Network Graph", networkGraphUI("networkGraphModule")),
+                        tabPanel("Scatter Plot", scatterUI("scatterModule"))
+                    )
+                )
+            ),
+            h3("Data Preview"),
+            DTOutput("dataPreview"),
+            h3("Missing Data Summary"),
+            DTOutput("missingDataSummary")
+        )
+    )
+)
+
+
+```
+
+```{r}
+server <- function(input, output, session) {
+    selectedData <- reactiveVal()
+
+    observeEvent(input$exitButton, {
+        stopApp()
+    })
+
+    observeEvent(input$loadData, {
+        req(input$dataset)  # Ensure that a dataset is selected
+        tryCatch({
+            data <- switch(input$dataset,
+                           "airquality" = airquality,
+                           "iris" = iris,
+                           "mtcars" = mtcars,
+                           "friends_quotes" = friends_quotes)
+            selectedData(data)
+        }, error = function(e) {
+            # Handle error (e.g., print the error message)
+            print(e)
+        })
+    })
+    
+    output$dataPreview <- renderDT({
+        head(selectedData(), 1000)
+    })
+    
+    output$missingDataSummary <- renderDT({
+        data <- selectedData()
+        if (!is.null(data)) {
+            summary <- data %>% summarise(across(everything(), ~sum(is.na(.))))
+            datatable(summary, options = list(
+                paging = FALSE,      # Disable pagination
+                searching = FALSE,   # Disable search box
+                info = FALSE         # Hide showing info like "Showing 1 to 10 of 50 entries"
+            ))
+        }
+    }, server = FALSE)
+
+    # Call the missing data module
+    missingDataServer("missingDataModule", selectedData)
+    
+    # Call the data filtering module
+    dataFilteringServer("dataFilteringModule", selectedData)
+    
+    # Call the data transformation module
+    dataTransformationServer("dataTransformationModule", selectedData)
+    
+    # Call the feature engineering module
+    featureEngineeringServer("featureEngineeringModule", selectedData)
+    
+    # Call the subsetting Module
+    subsettingServer("subsettingModule", selectedData)
+    
+    # Call the data aggregation module
+    dataAggregationServer("dataAggregationModule", selectedData)
+    
+    # Call the word cloud module
+    wordCloudServer("wordCloudModule", selectedData)
+    
+    # Call the network graph module
+    networkGraphServer("networkGraphModule", selectedData)
+    
+    # Call the data bar chart module
+    scatterServer("scatterModule", selectedData)
+    
+    # Call the histogram chart module
+    histogramServer("histogramModule", selectedData)
+    
+    # Call the summary module
+    summaryServer("summaryModule", selectedData)
+    
+    # Call the violin plot module
+    violinServer("violinPlotModule", selectedData)
+
+}
+
+
+```
+
+```{r}
+# Run the application
+shinyApp(ui = ui, server = server)
+```
+
+
